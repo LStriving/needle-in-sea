@@ -4,3 +4,6 @@ flash-attn==2.3.6
 seaborn
 pandas
 matplotlib
+tiktoken
+anthropic
+rouge_score
