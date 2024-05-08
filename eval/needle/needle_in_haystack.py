@@ -31,9 +31,26 @@ python -u needle_in_haystack.py --s_len 0 --e_len 128000\
     --model_provider LLaMA\
     --model_path ../../../llama-2-7b-80k
 ) 2>&1  | tee logs/eval_llama-2-7b-80k.log
+
+(
+python -u needle_in_haystack.py --s_len 0 --e_len 32000\
+    --model_provider LLaMA\
+    --model_path /chenyaofo/hf_models/Llama-2-7b-hf
+) 2>&1  | tee logs/eval_llama-2-7b-80k.log
+
+
+
+# Group attention model
+(
+    python -u needle_in_haystack.py --s_len 0 --e_len 128000\
+        --model_provider LLaMA\
+        --model_path /chenyaofo/project/NewAttention/output/group_attn_mean_1024_32K_ctxt\
+        --interval 36
+) 2>&1  | tee logs/eval_llama-2-7b-group-attention.log
 """
 
 import tiktoken
+import transformers
 import os 
 import glob
 import json
@@ -52,11 +69,19 @@ from openai import OpenAI
 from datetime import datetime, timezone
 import time
 import torch
+import rich
+from rich.console import Console
+from external.replace_llama_attn import replace_llama_attn
+
+console = Console()
 
 def reset_rope(model, model_max_train_len, scaling_factor):
     for l in model.model.layers:
         l.self_attn.rotary_emb.scaling_factor = scaling_factor
+    if transformers.__version__ < "4.38.2":
         l.self_attn.rotary_emb._set_cos_sin_cache(seq_len=model_max_train_len, device="cpu", dtype=torch.float32)
+    else:
+        console.log("Warning: transformers version >= 4.38.2, cos_sin cache is not set")
     return
 
 class LLMNeedleHaystackTester:
@@ -87,7 +112,9 @@ class LLMNeedleHaystackTester:
                  save_contexts = True,
                  final_context_length_buffer = 200,
                  seconds_to_sleep_between_completions = None,
-                 print_ongoing_status = True):
+                 print_ongoing_status = True,
+                 group_size = None,
+                 ):
         """        
         :param needle: The needle to be found in the haystack. Default is None.
         :param haystack_dir: The directory of text files to use as background context (or a haystack) in which the needle is to be found. Default is Paul Graham Essays.
@@ -112,6 +139,7 @@ class LLMNeedleHaystackTester:
         :param model_name: The name of the model. Default is 'gpt-4-1106-preview'.
         :param seconds_to_sleep_between_completions: The number of seconds to sleep between completions. Default is None.
         :param print_ongoing_status: Whether or not to print the ongoing status. Default is True.
+        :param group_size: The size of group when using group attention (for padding inputs) Default is None. [dev]
         """
         if not needle or not haystack_dir or not retrieval_question:
             raise ValueError("Needle, haystack, and retrieval_question must be provided.")
@@ -128,6 +156,7 @@ class LLMNeedleHaystackTester:
         self.print_ongoing_status = print_ongoing_status
         self.model_provider = model_provider
         self.testing_results = []
+        self.group_size = None
 
         if("/" in model_name):
             self.model_version = model_name.split("/")[-1]
@@ -159,12 +188,24 @@ class LLMNeedleHaystackTester:
         self.model_name = model_name
 
         if(self.model_provider not in ["OpenAI", "Anthropic"]):
-            self.enc = AutoTokenizer.from_pretrained(model_name)
-            print("loading from %s" % model_name)
+            if group_size is not None:
+                # TODO: ref: /chenyaofo/project/NewAttention/dschat/utils/utils.py special_token?
+                self.enc = AutoTokenizer.from_pretrained(model_name, fast_tokenizer=True) # no truncation
+                if self.enc.pad_token is None:
+                    assert self.enc.eos_token is not None
+                    # self.enc.add_special_tokens({'pad_token': self.enc.eos_token})
+                    self.enc.add_special_tokens({'pad_token': '[PAD]'})
+                    # self.enc.padding_side = 'left'
+                self.group_size = group_size
+            else:
+                self.enc = AutoTokenizer.from_pretrained(model_name)
 
+            
             self.model_to_test = AutoModelForCausalLM.from_pretrained(model_name,
-                                                                use_flash_attention_2="flash_attention_2", 
+                                                                # use_flash_attention_2="flash_attention_2", 
+                                                                attn_implementation="eager", 
                                                                 torch_dtype=torch.bfloat16,
+                                                                use_cache=False,
                                                                 ).eval()
             scaling_factor = 10 # hardcode
             reset_rope(self.model_to_test, model_max_train_len=81920, scaling_factor=scaling_factor)
@@ -254,7 +295,10 @@ class LLMNeedleHaystackTester:
             )
             response = response.choices[0].message.content
         else:
-            prompt = self.enc(prompt, return_tensors="pt")
+            if not self.group_size:
+                prompt = self.enc(prompt, return_tensors="pt")
+            else:
+                prompt = self.enc(prompt, return_tensors="pt", padding=True, pad_to_multiple_of=self.group_size)
             input_ids = prompt['input_ids'].to(self.model_to_test.device)
             with torch.no_grad():
                 output_ids = self.model_to_test.generate(input_ids, max_new_tokens=50)
@@ -477,6 +521,8 @@ if __name__ == "__main__":
     parser.add_argument('--model_name_suffix', type=str, default=None, help='name of model')
     parser.add_argument('--model_provider', type=str, default="LLaMA", help='which model to use')
     parser.add_argument('--api_key', type=str, default="", help='OpenAI API Key')
+    parser.add_argument('--interval', type=int, default=36, help='number of intervals to use for context length')
+    parser.add_argument('--group_size',type=int, default=None, help='size of group to use for group attention model')
     # parser = add_args(parser)
     args = parser.parse_args()
 
@@ -486,13 +532,22 @@ if __name__ == "__main__":
     else: 
         assert(args.model_name is not None)
         model_name = args.model_name
+    
+    if 'group_attn' in model_name or 'newatt' in model_name.lower(): # TODO:possible to miss...
+        assert(args.group_size is not None)
+        group_size=args.group_size
+        p_func='mean'
+        console.log(f'Info: Replacing with group attention...: \nGroup Size:{group_size}\nPool Func:{p_func}')
+        replace_llama_attn(True, g_size=group_size, p_func=p_func)
 
     ht = LLMNeedleHaystackTester(model_name=model_name, 
                                  model_name_suffix=args.model_name_suffix,
                                  model_provider=args.model_provider,
                                  save_contexts=True,
                                  save_results=True,
-                                 openai_api_key=args.api_key
+                                 openai_api_key=args.api_key,
+                                 context_lengths_num_intervals = args.interval,
+                                 group_size=args.group_size,
                                  )
 
     ht.start_test(args)
