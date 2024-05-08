@@ -252,14 +252,14 @@ def load_model(
         model.resize_token_embeddings(32001)
     elif("together" in model_name):
         # NOTE: this one you can directly load from HF without change modification
-        model = AutoModelForCausalLM.from_pretrained(model_name, use_flash_attention_2="flash_attention_2", 
+        model = AutoModelForCausalLM.from_pretrained(model_name, attn_implementation="flash_attention_2", 
                                                      torch_dtype=torch.bfloat16,
                                                      ).eval()
         scaling_factor = 32 # hardcode
         reset_rope(model, model_max_train_len=81920, scaling_factor=scaling_factor)
     else: 
         # Our LLaMA-2 7B 80K
-        model = AutoModelForCausalLM.from_pretrained(model_name, use_flash_attention_2="flash_attention_2", 
+        model = AutoModelForCausalLM.from_pretrained(model_name, attn_implementation="flash_attention_2", 
                                                      torch_dtype=torch.bfloat16,
                                                      ).eval()
         scaling_factor = 10 # hardcode

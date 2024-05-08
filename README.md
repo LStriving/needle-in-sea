@@ -60,7 +60,7 @@ from transformers import AutoModelForCausalLM
 # Below is slow and hard to control in a cluster
 # Unless you insist, **we recommend you download the model to local first**
 model = AutoModelForCausalLM.from_pretrained("yaofu/llama-2-7b-80k", 
-                                             use_flash_attention_2="flash_attention_2", 
+                                             attn_implementation="flash_attention_2", 
                                              torch_dtype=torch.bfloat16
                                              ) 
 ```
@@ -83,7 +83,7 @@ def reset_rope(model, model_max_train_len, scaling_factor):
         l.self_attn.rotary_emb._set_cos_sin_cache(seq_len=model_max_train_len, device="cpu", dtype=torch.float32)
     return
 model = AutoModelForCausalLM.from_pretrained("../llama-2-7b-80k",
-                                             use_flash_attention_2="flash_attention_2", 
+                                             attn_implementation="flash_attention_2", 
                                              torch_dtype=torch.bfloat16
                                              ) # requires about 14G disk size in $HF_HOME
 scaling_factor = 10 # hardcode here
